@@ -1,0 +1,13 @@
+torch
+wandb
+einops
+fancy_einsum
+tqdm
+ipykernel
+notebook
+ipywidgets
+jupyter
+matplotlib
+numpy-stl
+wandb
+plotly
