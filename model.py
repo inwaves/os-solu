@@ -22,11 +22,13 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.config = config
 
-        # Embed,
-        self.embed = nn.Embedding(num_embeddings, config.d_model)
-        # One MLP, one attention
-        # one layernorm, one dropout (?)
-        # Unembed
+        self.embed = nn.Embedding(config.num_embeddings, config.d_model)
+        self.linear = nn.Sequential(
+            nn.Linear(config.d_model, config.d_model),
+            SoLU(),
+        )
+        self.layer_norm = nn.LayerNorm(normalized_shape)
+        self.unembed = nn.Embedding(config.num_embeddings, config.d_model)
 
     def forward(self, x: t.Tensor) -> t.Tensor:
         pass
