@@ -15,7 +15,8 @@ class OsSoluModel(nn.Module):
         self.config = config
         self.embed_positions = nn.Embedding(config.max_positional_embeddings, config.d_model)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
-        self.transformer_block = TransformerBlock(config)
+        self.dropout = nn.Dropout(config.dropout)
+        self.transformer_blocks = nn.ModuleList([GPT2Block(config) for _ in range(config.num_blocks)])
         self.final_ln = nn.LayerNorm(normalized_shape, config.ln_eps)
         self.unembed = nn
 
@@ -23,23 +24,36 @@ class OsSoluModel(nn.Module):
         positional_embeddings = self.embed_positions(t.arange(x.size(1)))
         token_embeddings = self.embed_tokens(x)
         embeddings = positional_embeddings + token_embeddings
+        out = self.dropout(embeddings)
+        out = self.transformer_blocks(out)
 
+class SoLU(nn.Module):
+    def __init__(self):
+        pass
 
-class TransformerBlock(nn.Module):
+    def forward(self, x: t.Tensor) -> t.Tensor:
+        return x * x.softmax(dim=-1)
+
+class GPT2Block(nn.Module):
     def __init__(self, config: OsSoluConfig) -> None:
         super().__init__() 
         self.config = config
 
+        self.layer_norm1 = nn.LayerNorm(normalized_shape, config.ln_eps)
         self.attention = UnidirectionalAttention(config) if config.self_attention_type == "unidirectional" else RotaryAttention(config)
-        self.linear = nn.Sequential(
-            nn.Linear(config.d_model, config.d_model),
+        self.MLP = nn.Sequential(
+            nn.LayerNorm(normalized_shape, config.ln_eps),
+            nn.Linear(config.d_model, 4*config.d_model),
             SoLU(),
+            nn.Linear(4*config.d_model, config.d_model),
+            nn.Dropout(config.dropout)
         )
-        self.layer_norm = nn.LayerNorm(normalized_shape, config.ln_eps)
-        self.unembed = nn.Embedding(config.num_embeddings, config.d_model)
 
     def forward(self, x: t.Tensor) -> t.Tensor:
-        pass
+        x = x + self.attention(self.layer_norm1(x))
+        x = x + self.MLP(x)
+        return x
+        
 
 
 class UnidirectionalAttention(nn.Module):
@@ -96,4 +110,5 @@ class RotaryAttention(nn.Module):
         self.config = config
         
     def forward(self, x: t.Tensor) -> t.Tensor:
+        # TODO: implement rotary self-attention
         pass
