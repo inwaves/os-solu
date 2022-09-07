@@ -8,28 +8,35 @@ from einops import rearrange, repeat, reduce
 from utils import OsSoluConfig
 
 
+
 class OsSoluModel(nn.Module):
+    """An open-source implementation of a SoLU-based transformer. This is a GPT-style architecture model
+    where the nonlinearity in the MLP block is replaced with SoLU(x) = x * softmax(x)."""
     def __init__(self, config: OsSoluConfig) -> None:
         super().__init__()
-        normalised_shape = None             # TODO: normalised_shape should be defined properly
         self.config = config
         self.embed_positions = nn.Embedding(config.max_positional_embeddings, config.d_model)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
         self.dropout = nn.Dropout(config.dropout)
         self.transformer_blocks = nn.ModuleList([GPT2Block(config) for _ in range(config.num_blocks)])
-        self.final_ln = nn.LayerNorm(normalized_shape, config.ln_eps)
-        self.unembed = nn
+        self.final_ln = nn.LayerNorm(config.d_model, config.ln_eps)
 
     def forward(self, x: t.Tensor) -> t.Tensor:
         positional_embeddings = self.embed_positions(t.arange(x.size(1)))
         token_embeddings = self.embed_tokens(x)
         embeddings = positional_embeddings + token_embeddings
         out = self.dropout(embeddings)
-        out = self.transformer_blocks(out)
+        for block in self.transformer_blocks:
+            out = block(out)
+
+        # Unembedding is not separate, so we just einsum with token embedding weights.
+        out = einsum("vocab hidden, batch seq hidden -> batch seq vocab", self.embed_tokens.weight, out)
+        return out
 
 class SoLU(nn.Module):
+    """A simple wrapper around the SoLU function such that it can be used as a layer in a model."""
     def __init__(self):
-        pass
+        super().__init__()
 
     def forward(self, x: t.Tensor) -> t.Tensor:
         return x * x.softmax(dim=-1)
@@ -39,12 +46,13 @@ class GPT2Block(nn.Module):
         super().__init__() 
         self.config = config
 
-        self.layer_norm1 = nn.LayerNorm(normalized_shape, config.ln_eps)
+        self.layer_norm1 = nn.LayerNorm(config.d_model, config.ln_eps)
         self.attention = UnidirectionalAttention(config) if config.self_attention_type == "unidirectional" else RotaryAttention(config)
+        nonlinearity = SoLU() if config.nonlinearity == "solu" else nn.ReLU()
         self.MLP = nn.Sequential(
-            nn.LayerNorm(normalized_shape, config.ln_eps),
+            nn.LayerNorm(config.d_model, config.ln_eps),
             nn.Linear(config.d_model, 4*config.d_model),
-            SoLU(),
+            nonlinearity,
             nn.Linear(4*config.d_model, config.d_model),
             nn.Dropout(config.dropout)
         )
