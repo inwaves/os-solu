@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.functional as F
 import torch.optim as optim
 import wandb
-import fancy_einsum as einsum
+from fancy_einsum import einsum
 from einops import rearrange, repeat, reduce
 from utils import OsSoluConfig
 
@@ -22,7 +22,7 @@ class OsSoluModel(nn.Module):
         self.final_ln = nn.LayerNorm(config.d_model, config.ln_eps)
 
     def forward(self, x: t.Tensor) -> t.Tensor:
-        positional_embeddings = self.embed_positions(t.arange(x.size(1)))
+        positional_embeddings = self.embed_positions(t.arange(x.size(1), device=x.device))
         token_embeddings = self.embed_tokens(x)
         embeddings = positional_embeddings + token_embeddings
         out = self.dropout(embeddings)
@@ -69,9 +69,9 @@ class UnidirectionalAttention(nn.Module):
         super().__init__()
         self.num_heads = config.num_heads
         self.d_model = config.d_model
-        self.project_q = nn.Linear(config.num_embeddings, config.d_model)
-        self.project_k = nn.Linear(config.num_embeddings, config.d_model)
-        self.project_v = nn.Linear(config.num_embeddings, config.d_model)
+        self.project_q = nn.Linear(config.d_model, config.d_model)
+        self.project_k = nn.Linear(config.d_model, config.d_model)
+        self.project_v = nn.Linear(config.d_model, config.d_model)
         self.project_out = nn.Linear(config.d_model, config.d_model)
         self.LARGE_NEGATIVE_VALUE = -1e5
 
@@ -84,7 +84,11 @@ class UnidirectionalAttention(nn.Module):
 
         Q = self.hidden_to_heads(Q)
         K = self.hidden_to_heads(K)
-        attention_pattern = einsum("batch num_heads seqlen_q head_size, batch num_heads seqlen_k head_size -> batch num_heads seqlen_q seqlen_k")
+        attention_pattern = einsum(
+            "batch num_heads seqlen_q head_size, "
+            "batch num_heads seqlen_k head_size ->"
+            "batch num_heads seqlen_q seqlen_k",
+            Q, K)
 
         return attention_pattern
 
@@ -95,18 +99,23 @@ class UnidirectionalAttention(nn.Module):
         
         # Masking attention. Since GPT is unidirectional, it should only attend to previous tokens.
         if seqlen > 1:
-            fst_range = t.arange(seqlen, device=self.device).unsqueeze(0).T
-            snd_range = t.arange(seqlen, device=self.device).unsqueeze(0)
+            fst_range = t.arange(seqlen, device=x.device).unsqueeze(0).T
+            snd_range = t.arange(seqlen, device=x.device).unsqueeze(0)
             bool_array = fst_range < snd_range
-            attention_score[..., bool_array] = self.LARGE_NEGATIVE_VALUE
+            attention_pattern[..., bool_array] = self.LARGE_NEGATIVE_VALUE
         
         
         attention_pattern = attention_pattern / t.sqrt(t.tensor(self.d_model // self.num_heads))
         attention_score = attention_pattern.softmax(dim=-1)
         
         V = self.hidden_to_heads(V)
-        out = einsum("batch num_heads seqlen_q seqlen_k, batch num_heads seqlen_k head_size -> batch num_heads seqlen_q head_size", attention_score, V)
-        out = rearrange("b nh s hs -> b s (nh hs)")
+        out = einsum(
+            "batch num_heads seqlen_q seqlen_k,"
+            "batch num_heads seqlen_k head_size ->"
+            "batch num_heads seqlen_q head_size", 
+            attention_score, V)
+
+        out = rearrange(out, "b nh s hs -> b s (nh hs)")
         out = self.project_out(out)
         
 

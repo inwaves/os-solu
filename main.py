@@ -1,4 +1,5 @@
 import argparse
+import time
 import torch as t
 import torch.nn as nn
 import torch.functional as F
@@ -9,7 +10,8 @@ import wandb
 from typing import Tuple
 from torch.utils.data.dataloader import DataLoader
 from datasets import load_dataset
-from utils import OsSoluConfig
+from transformers import AutoTokenizer
+from utils import OsSoluConfig, tokenise
 from model import OsSoluModel
 
 WANDB_PROJECT_NAME = "os_solu"
@@ -32,7 +34,7 @@ def parse_arguments() -> dict:
     parser.add_argument("--dropout", type=float, default=0.1, help="Probability of dropout.")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for the optimiser.")
     parser.add_argument("--ln_eps", type=float, default=1e-3, help="Layer norm epsilon.")
-    parser.add_argument("--max_positional_embeddings", type=int, default=1024, help="Maximum number of positional embeddings.")
+    parser.add_argument("--max_positional_embeddings", type=int, default=1024, help="Maximum number of positional embeddings/sequence length.")
     parser.add_argument("--nonlinearity", type=str, default="solu", help=" Nonlinearity to use inside MLP block: must be relu or solu.")
     parser.add_argument("--num_blocks", type=int, default=1, help="Number of transformer blocks.")
     parser.add_argument("--num_embeddings", type=int, default=1024, help="Number of embeddings.")
@@ -40,7 +42,7 @@ def parse_arguments() -> dict:
     parser.add_argument("--num_heads", type=int, default=4, help="Number of attention heads in each attention layer.")
     parser.add_argument("--optimiser_type", type=str, default="adam", help="Optimiser type.")
     parser.add_argument("--self_attention_type", type=str, default="unidirectional", help="What type of attention to use: rotary or unidirectional.")
-    parser.add_argument("--vocab_size", type=int, default=65536, help="Vocabulary size of the input sequence.")
+    parser.add_argument("--vocab_size", type=int, default=50_278, help="Vocabulary size of the input sequence.")
     args = vars(parser.parse_args())
 
     # Parse string arguments.
@@ -67,7 +69,6 @@ def train(config: OsSoluConfig, model: OsSoluModel, train_dataloader: DataLoader
     Returns:
         OsSoluModel: The trained model.
     """
-    # TODO: training loop
     train_loss_fn = t.nn.CrossEntropyLoss()
     wandb.watch(model, criterion=train_loss_fn, log="all", log_freq=10, log_graph=True)
 
@@ -77,16 +78,17 @@ def train(config: OsSoluConfig, model: OsSoluModel, train_dataloader: DataLoader
 
     # Train loop.
     examples_seen = 0
+    train_data_iterator = iter(train_dataloader)
     for epoch in range(config.num_epochs):
-        for i, (data, target) in enumerate(tqdm(train_dataloader)):
-            print(data, target)
+        for i, batch in enumerate(tqdm(train_data_iterator
+    )):
+            data = batch["text"]
             data = data.to(DEVICE)
-            target = target.to(DEVICE)
 
             predictions = model(data)
             accuracy = (predictions.argmax(dim=-1) == target).sum() / len(data)
             optimiser.zero_grad()
-            loss = train_loss_fn(target, predictions)
+            # loss = train_loss_fn(data, predictions)
             loss.backward()
             optimiser.step()
 
@@ -109,9 +111,10 @@ def eval(model: OsSoluModel, test_dataloader: DataLoader) -> None:
     total_loss, num_correct = 0, 0
     model.eval()
     with t.inference_mode():
-        for i, (data, target) in enumerate(tqdm(test_dataloader)):
+        test_data_iterator = iter(test_dataloader)
+        for i, (data, target) in enumerate(tqdm(test_data_iterator)):
+            data = batch["text"]
             data = data.to(DEVICE)
-            target = target.to(DEVICE)
 
             predictions = model(data)
             num_correct += (predictions.argmax(dim=-1) == target).sum().item()
@@ -134,15 +137,31 @@ def setup() -> Tuple[OsSoluConfig, OsSoluModel]:
     args = parse_arguments()
     wandb.init(project=WANDB_PROJECT_NAME, config=args)
     config = OsSoluConfig(args)
-    model = OsSoluModel(config)
+    model = OsSoluModel(config).to(DEVICE)
 
+    start_data_time = time.time()
     # Load and prep data.
     ds = load_dataset("the_pile", streaming=True)
-    train_dataset = ds["train"].with_format("torch")
-    train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size)
 
-    test_dataset = ds["test"].with_format("torch")
+    try:
+        ds = ds.remove_columns("meta")
+    except:
+        print("Dataset did not contain 'meta' column.")
+
+    train_dataset = ds["train"]
+    test_dataset = ds["test"]
+
+    # TODO: tokenise the data before sending it to the model.
+    tokeniser = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+    tokeniser.add_special_tokens({"pad_token": "<PAD>"})
+
+    train_dataset = train_dataset.map(lambda x: tokenise(x, tokeniser), batched=True).with_format("torch")
+    test_dataset = test_dataset.map(tokenise, batched=True).with_format("torch")
+
+    train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size)
     test_dataloader = DataLoader(test_dataset, batch_size=config.batch_size)
+    print(f"Data loaded in {time.time() - start_data_time:.1f}s.")
+
     return config, model, (train_dataloader, test_dataloader)
 
 if __name__=="__main__":
