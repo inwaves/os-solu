@@ -5,3 +5,7 @@ Replicating the results in the paper [Softmax Linear Units](https://transformer-
 TODO: update this readme with:
 - usage information
 - how to log runs, how to use pysvelte to look at activations
+
+---
+license: mit
+---
