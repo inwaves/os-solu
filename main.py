@@ -33,7 +33,7 @@ def parse_arguments() -> dict:
     """
     parser = argparse.ArgumentParser(description="Parse command-line arguments for this model.")
     parser.add_argument("--batch_size", type=int, default=40, help="Batch size used in training.")
-    parser.add_argument("--checkpoint_every_n_tokens", type=int, default=50_000, help="Save a checkpoint of the model every n tokens processed.")
+    parser.add_argument("--checkpoint_every_n_tokens", type=int, default=500_000_000, help="Save a checkpoint of the model every n tokens processed.")
     parser.add_argument("--d_model", type=int, default=512, help="Hidden size of the model.")
     parser.add_argument("--dropout", type=float, default=0.1, help="Probability of dropout.")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for the optimiser.")
@@ -96,7 +96,9 @@ def train(config: OsSoluConfig, model: OsSoluModel, train_dataloader: DataLoader
             optimiser.step()
 
             wandb.log(dict(train_loss=loss, elapsed=time.time() - start_time), step=examples_seen)
-            examples_seen += len(batch)
+
+            # Number of tokens processed is batch_size * sequence_length.
+            examples_seen += batch.numel()
 
             # Save a checkpoint of the model.
             if examples_seen % config.checkpoint_every_n_tokens == 0:
@@ -168,11 +170,10 @@ def setup() -> Tuple[OsSoluConfig, OsSoluModel]:
     train_dataset = ds["train"]
     test_dataset = ds["test"]
 
-    # TODO: tokenise the data before sending it to the model.
     tokeniser = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
     tokeniser.add_special_tokens({"pad_token": "<PAD>"})
 
-    train_dataset = train_dataset.map(lambda x: tokenise(x, tokeniser), batched=True).with_format("torch")
+    train_dataset = train_dataset.map(lambda x: tokenise(x, tokeniser, 1, config.max_positional_embeddings), batched=True).with_format("torch")
     test_dataset = test_dataset.map(tokenise, batched=True).with_format("torch")
 
     train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size)

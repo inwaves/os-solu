@@ -42,7 +42,7 @@ class OsSoluConfig:
         self.self_attention_type = args["self_attention_type"]
         self.vocab_size = args["vocab_size"]
 
-def tokenise(batch, tokeniser, num_gpus: int = 1, context_length: int = 1024):
+def tokenise(batch, tokeniser, num_gpus: int, context_length: int):
     """Tokenise a batch of text data. This implementation is idiosyncratic to the Pile dataset, but can be easily modified to work with e.g. C4. Code from Neel.
 
     Args:
