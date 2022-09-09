@@ -7,7 +7,8 @@ from fancy_einsum import einsum
 from einops import rearrange, repeat, reduce
 from utils import OsSoluConfig
 
-
+# TODO: Add hooks to the model.
+# TODO: Add support for mixing dense and sparse attention.
 
 class OsSoluModel(nn.Module):
     """An open-source implementation of a SoLU-based transformer. This is a GPT-style architecture model
@@ -128,4 +129,13 @@ class RotaryAttention(nn.Module):
         
     def forward(self, x: t.Tensor) -> t.Tensor:
         # TODO: implement rotary self-attention
+        pass
+
+class LayerNorm(nn.Module):
+    def __init__(self, config: OsSoluConfig) -> None:
+        super().__init__()
+        self.config = config
+        
+    def forward(self, x: t.Tensor) -> t.Tensor:
+        # TODO: implement layernorm with hooks on normalisation only.
         pass

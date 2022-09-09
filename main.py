@@ -11,11 +11,14 @@ from typing import Tuple
 from torch.utils.data.dataloader import DataLoader
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from utils import OsSoluConfig, tokenise
+from utils import OsSoluConfig, tokenise, loss_fn, count_parameters
 from model import OsSoluModel
 
 WANDB_PROJECT_NAME = "os_solu"
 DEVICE = "cuda" if t.cuda.is_available() else "cpu"
+
+# TODO: Add support for distributed training.
+# TODO: Use only book data from dataset.
 
 def parse_arguments() -> dict:
     """Parses command-line arguments for this model run. Arguments of type string have allowed values, 
@@ -29,7 +32,8 @@ def parse_arguments() -> dict:
         dict: a dictionary containing the command-line arguments parsed by this function.
     """
     parser = argparse.ArgumentParser(description="Parse command-line arguments for this model.")
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size used in training.")
+    parser.add_argument("--batch_size", type=int, default=40, help="Batch size used in training.")
+    parser.add_argument("--checkpoint_every_n_tokens", type=int, default=50_000, help="Save a checkpoint of the model every n tokens processed.")
     parser.add_argument("--d_model", type=int, default=512, help="Hidden size of the model.")
     parser.add_argument("--dropout", type=float, default=0.1, help="Probability of dropout.")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate for the optimiser.")
@@ -38,7 +42,7 @@ def parse_arguments() -> dict:
     parser.add_argument("--nonlinearity", type=str, default="solu", help=" Nonlinearity to use inside MLP block: must be relu or solu.")
     parser.add_argument("--num_blocks", type=int, default=1, help="Number of transformer blocks.")
     parser.add_argument("--num_embeddings", type=int, default=1024, help="Number of embeddings.")
-    parser.add_argument("--num_epochs", type=int, default=5, help="Number of epochs to run for.")
+    parser.add_argument("--num_epochs", type=int, default=1, help="Number of epochs to run for.")
     parser.add_argument("--num_heads", type=int, default=4, help="Number of attention heads in each attention layer.")
     parser.add_argument("--optimiser_type", type=str, default="adam", help="Optimiser type.")
     parser.add_argument("--self_attention_type", type=str, default="unidirectional", help="What type of attention to use: rotary or unidirectional.")
@@ -69,8 +73,7 @@ def train(config: OsSoluConfig, model: OsSoluModel, train_dataloader: DataLoader
     Returns:
         OsSoluModel: The trained model.
     """
-    train_loss_fn = t.nn.CrossEntropyLoss()
-    wandb.watch(model, criterion=train_loss_fn, log="all", log_freq=10, log_graph=True)
+    wandb.watch(model, criterion=loss_fn, log="all", log_freq=10, log_graph=True)
 
     # Initialise optimiser.
     opt = optim.Adam if config.optimiser_type.lower() == "adam" else optim.SGD
@@ -82,18 +85,32 @@ def train(config: OsSoluConfig, model: OsSoluModel, train_dataloader: DataLoader
     for epoch in range(config.num_epochs):
         for i, batch in enumerate(tqdm(train_data_iterator
     )):
-            data = batch["text"]
-            data = data.to(DEVICE)
+            start_time = time.time()
+            batch = batch["text"]
+            batch = batch.to(DEVICE)
 
-            predictions = model(data)
-            accuracy = (predictions.argmax(dim=-1) == target).sum() / len(data)
+            logits = model(batch)
             optimiser.zero_grad()
-            # loss = train_loss_fn(data, predictions)
+            loss = loss_fn(logits, batch)
             loss.backward()
             optimiser.step()
 
-            wandb.log(dict(train_loss=loss, train_accuracy=accuracy, elapsed=time.time() - start_time), step=examples_seen)
-            examples_seen += len(data)
+            wandb.log(dict(train_loss=loss, elapsed=time.time() - start_time), step=examples_seen)
+            examples_seen += len(batch)
+
+            # Save a checkpoint of the model.
+            if examples_seen % config.checkpoint_every_n_tokens == 0:
+                # Save the model's state on disk, then upload to wandb.
+                filename = f"{wandb.run.dir}/os_solu_model_ckpt_step_{examples_seen}.pt"
+                t.save({
+                    "step": examples_seen,
+                    "model_state_dict": model.state_dict(),
+                    "optimiser_state_dict": optimiser.state_dict(),
+                    "loss": loss.item()
+                }, filename)
+                wandb.save(filename)
+                print(f"Checkpointing model at {examples_seen} tokens seen.")
+
 
     return model
 
@@ -112,15 +129,14 @@ def eval(model: OsSoluModel, test_dataloader: DataLoader) -> None:
     model.eval()
     with t.inference_mode():
         test_data_iterator = iter(test_dataloader)
-        for i, (data, target) in enumerate(tqdm(test_data_iterator)):
-            data = batch["text"]
-            data = data.to(DEVICE)
+        for i, batch in enumerate(tqdm(test_data_iterator)):
+            batch = batch["text"]
+            batch = batch.to(DEVICE)
 
-            predictions = model(data)
-            num_correct += (predictions.argmax(dim=-1) == target).sum().item()
-            total_loss += test_loss_fn(target, predictions).item()
-            examples_seen += len(data)
-        wandb.log(dict(test_loss=total_loss, test_accuracy=num_correct / examples_seen, elapsed=time.time() - start_time), step=examples_seen)
+            logits = model(batch)
+            total_loss += loss_fn(logits, batch).item()
+            examples_seen += len(batch)
+        wandb.log(dict(test_loss=total_loss, elapsed=time.time() - start_time), step=examples_seen)
     
     # Save the model's state on disk, then upload to wandb.
     filename = f"{wandb.run.dir}/model_state_dict.pt"
@@ -135,9 +151,10 @@ def setup() -> Tuple[OsSoluConfig, OsSoluModel]:
         Tuple[OsSoluConfig, OsSoluModel, datasets.iterable_dataset.IterableDataset, datasets.iterable_dataset.IterableDataset]: A tuple containing a config, a model, a training dataset and a test dataset.
     """
     args = parse_arguments()
-    wandb.init(project=WANDB_PROJECT_NAME, config=args)
     config = OsSoluConfig(args)
     model = OsSoluModel(config).to(DEVICE)
+    args["num_parameters"] = count_parameters(model)
+    wandb.init(project=WANDB_PROJECT_NAME, config=args)
 
     start_data_time = time.time()
     # Load and prep data.
