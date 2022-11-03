@@ -28,6 +28,7 @@ class OsSoluConfig:
     def __init__(self, args: dict) -> None:
         """Initialise this config class with values provided by a command-line argument parser.
            Values are never None here, as we provide suitable defaults in the parser call."""
+        self.num_examples = args["num_examples"]
         self.batch_size = args["batch_size"]
         self.checkpoint_every_n_tokens = args["checkpoint_every_n_tokens"]
         self.d_model = args["d_model"]

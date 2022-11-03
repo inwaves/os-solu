@@ -45,6 +45,7 @@ def parse_arguments() -> dict:
     parser.add_argument("--num_blocks", type=int, default=1, help="Number of transformer blocks.")
     parser.add_argument("--num_embeddings", type=int, default=1024, help="Number of embeddings.")
     parser.add_argument("--num_epochs", type=int, default=1, help="Number of epochs to run for.")
+    parser.add_argument("--num_examples", type=int, default=10_000, help="Number of examples to consider.")
     parser.add_argument("--num_heads", type=int, default=4, help="Number of attention heads in each attention layer.")
     parser.add_argument("--optimiser_type", type=str, default="adam", help="Optimiser type.")
     parser.add_argument("--self_attention_type", type=str, default="unidirectional",
@@ -140,7 +141,7 @@ def evaluate(model: OsSoluModel, test_dataloader: DataLoader) -> None:
 
             logits = model(batch)
             total_loss += loss_fn(logits, batch).item()
-            examples_seen += len(batch)
+            examples_seen += batch.numel()
         wandb.log(dict(test_loss=total_loss, elapsed=time.time() - start_time), step=examples_seen)
 
     # Save the model's state on disk, then upload to wandb.
@@ -171,15 +172,18 @@ def setup() -> Tuple[OsSoluConfig, OsSoluModel, DataLoader, DataLoader]:
     except:
         print("Dataset did not contain 'meta' column.")
 
-    train_dataset = ds["train"]
-    test_dataset = ds["test"]
+    # This limits the amount of examples to consider from the dataset.
+    # So far, I'm doing this for debugging reasons: the Pile is very large.
+    train_dataset = ds["train"].take(config.num_examples)
+    test_dataset = ds["test"].take(config.num_examples//5)
 
     tokeniser = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
     tokeniser.add_special_tokens({"pad_token": "<PAD>"})
 
     train_dataset = train_dataset.map(lambda x: tokenise(x, tokeniser, 1, config.max_positional_embeddings),
                                       batched=True).with_format("torch")
-    test_dataset = test_dataset.map(tokenise, batched=True).with_format("torch")
+    test_dataset = test_dataset.map(lambda x: tokenise(x, tokeniser, 1, config.max_positional_embeddings),
+                                    batched=True).with_format("torch")
 
     train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size)
     test_dataloader = DataLoader(test_dataset, batch_size=config.batch_size)
